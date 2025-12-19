@@ -1,35 +1,39 @@
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
+import path from "node:path";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
-const widgetHtml = readFileSync("public/widget.html", "utf8");
-
 const MCP_PATH = "/mcp";
 const port = Number(process.env.PORT ?? 8787);
 
-/**
- * Basic Origin allowlist (best-effort).
- * - Many server-to-server requests may not include Origin; those are allowed.
- * - If Origin is present, require https and a known suffix.
- */
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  try {
-    const u = new URL(origin);
-    if (u.protocol !== "https:") return false;
+const widgetHtml = readFileSync("public/widget.html", "utf8");
 
-    const h = u.hostname.toLowerCase();
-    return (
-      h === "chatgpt.com" ||
-      h.endsWith(".chatgpt.com") ||
-      h.endsWith(".openai.com") ||
-      h.endsWith(".oaiusercontent.com")
-    );
-  } catch {
-    return false;
-  }
+/**
+ * Serve any GET file under /public (needed for domain verification: /.well-known/openai)
+ * Example:
+ *   URL:  /.well-known/openai
+ *   File: public/.well-known/openai
+ */
+function tryServePublicFile(urlPathname, res) {
+  // decode and normalize to prevent path traversal
+  const decoded = decodeURIComponent(urlPathname);
+  const safe = path.posix.normalize(decoded).replace(/^(\.\.(\/|\\|$))+/, "");
+  const filePath = path.join(process.cwd(), "public", safe);
+
+  if (!existsSync(filePath)) return false;
+
+  const isHtml = filePath.endsWith(".html");
+  res.writeHead(200, {
+    "content-type": isHtml
+      ? "text/html; charset=utf-8"
+      : "text/plain; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  res.end(readFileSync(filePath));
+  return true;
 }
 
 function normalizeLines(s) {
@@ -137,7 +141,7 @@ ${sections.map((s) => `## ${s.heading}\n\n${s.body}\n`).join("\n")}
 function createScopeSowServer() {
   const server = new McpServer({ name: "scope-to-sow", version: "0.1.0" });
 
-  // Widget resource (rendered inside ChatGPT)
+  // Widget resource
   server.registerResource(
     "scope-sow-widget",
     "ui://widget/scope-sow.html",
@@ -152,7 +156,6 @@ function createScopeSowServer() {
             "openai/widgetPrefersBorder": true,
             "openai/widgetDescription":
               "Fill a few fields to generate a client-ready Statement of Work (SOW).",
-            // Tight CSP allowlist: we do not fetch external resources.
             "openai/widgetCSP": {
               connect_domains: [],
               resource_domains: ["https://*.oaistatic.com"]
@@ -163,7 +166,7 @@ function createScopeSowServer() {
     })
   );
 
-  // Tool: open the widget
+  // Open widget tool
   server.registerTool(
     "open_sow_builder",
     {
@@ -183,7 +186,7 @@ function createScopeSowServer() {
     })
   );
 
-  // Tool: generate SOW
+  // Generate SOW tool
   const generateInputSchema = {
     project_name: z.string().min(1),
     client: z.string().optional(),
@@ -197,7 +200,7 @@ function createScopeSowServer() {
     "generate_sow",
     {
       title: "Generate SOW",
-      description: "Generates a client-ready Statement of Work (SOW) from structured inputs.",
+      description: "Generates a client-ready SOW from structured inputs.",
       inputSchema: generateInputSchema,
       _meta: {
         "openai/outputTemplate": "ui://widget/scope-sow.html",
@@ -225,43 +228,28 @@ const httpServer = createServer(async (req, res) => {
     return;
   }
 
-  const origin = req.headers.origin;
-  if (!isAllowedOrigin(origin)) {
-    res.writeHead(403, { "content-type": "text/plain" }).end("Forbidden origin");
-    return;
-  }
-
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
-
-  // Accept both /mcp and /mcp/ (fixes common routing mismatch)
   const isMcpRoute = url.pathname === MCP_PATH || url.pathname === `${MCP_PATH}/`;
 
-  // Health check
+  // 1) Serve static files under /public for ANY GET path except "/" and MCP
+  if (req.method === "GET" && url.pathname !== "/" && !isMcpRoute) {
+    const served = tryServePublicFile(url.pathname, res);
+    if (served) return;
+  }
+
+  // 2) Health check
   if (req.method === "GET" && url.pathname === "/") {
-    res.writeHead(200, { "content-type": "text/plain" }).end("Scope-to-SOW MCP server");
+    res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Scope-to-SOW MCP server");
     return;
   }
 
-  // CORS preflight for MCP
-  if (req.method === "OPTIONS" && isMcpRoute) {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE",
-      "Access-Control-Allow-Headers": "content-type, mcp-session-id",
-      "Access-Control-Expose-Headers": "Mcp-Session-Id"
-    });
-    res.end();
-    return;
-  }
-
+  // 3) MCP endpoint
   const MCP_METHODS = new Set(["POST", "GET", "DELETE"]);
   if (isMcpRoute && req.method && MCP_METHODS.has(req.method)) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
-
     const server = createScopeSowServer();
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined, // stateless mode
+      sessionIdGenerator: undefined,
       enableJsonResponse: true
     });
 
@@ -273,8 +261,8 @@ const httpServer = createServer(async (req, res) => {
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res);
-    } catch (error) {
-      console.error("Error handling MCP request:", error);
+    } catch (err) {
+      console.error(err);
       if (!res.headersSent) res.writeHead(500).end("Internal server error");
     }
     return;
