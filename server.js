@@ -9,6 +9,11 @@ const widgetHtml = readFileSync("public/widget.html", "utf8");
 const MCP_PATH = "/mcp";
 const port = Number(process.env.PORT ?? 8787);
 
+/**
+ * Basic Origin allowlist (best-effort).
+ * - Many server-to-server requests may not include Origin; those are allowed.
+ * - If Origin is present, require https and a known suffix.
+ */
 function isAllowedOrigin(origin) {
   if (!origin) return true;
   try {
@@ -43,6 +48,7 @@ function buildSowDoc(input) {
   const constraints = normalizeLines(input.constraints);
 
   const title = `Statement of Work (SOW) — ${projectName || "Project"}`;
+
   const sections = [];
 
   sections.push({
@@ -51,18 +57,19 @@ function buildSowDoc(input) {
       client ? `Client: ${client}` : null,
       `Project: ${projectName || "—"}`,
       `Goal: ${goal || "—"}`
-    ].filter(Boolean).join("\n")
+    ]
+      .filter(Boolean)
+      .join("\n")
   });
 
   sections.push({
     heading: "2. Scope",
-    body:
-      deliverables
-        ? `Deliverables (what will be produced):\n- ${deliverables
-            .split("\n")
-            .filter(Boolean)
-            .join("\n- ")}`
-        : "Deliverables: —"
+    body: deliverables
+      ? `Deliverables (what will be produced):\n- ${deliverables
+          .split("\n")
+          .filter(Boolean)
+          .join("\n- ")}`
+      : "Deliverables: —"
   });
 
   sections.push({
@@ -119,8 +126,7 @@ function buildSowDoc(input) {
     });
   }
 
-  const markdown =
-`# ${title}
+  const markdown = `# ${title}
 
 ${sections.map((s) => `## ${s.heading}\n\n${s.body}\n`).join("\n")}
 `;
@@ -131,6 +137,7 @@ ${sections.map((s) => `## ${s.heading}\n\n${s.body}\n`).join("\n")}
 function createScopeSowServer() {
   const server = new McpServer({ name: "scope-to-sow", version: "0.1.0" });
 
+  // Widget resource (rendered inside ChatGPT)
   server.registerResource(
     "scope-sow-widget",
     "ui://widget/scope-sow.html",
@@ -145,6 +152,7 @@ function createScopeSowServer() {
             "openai/widgetPrefersBorder": true,
             "openai/widgetDescription":
               "Fill a few fields to generate a client-ready Statement of Work (SOW).",
+            // Tight CSP allowlist: we do not fetch external resources.
             "openai/widgetCSP": {
               connect_domains: [],
               resource_domains: ["https://*.oaistatic.com"]
@@ -155,6 +163,7 @@ function createScopeSowServer() {
     })
   );
 
+  // Tool: open the widget
   server.registerTool(
     "open_sow_builder",
     {
@@ -169,16 +178,12 @@ function createScopeSowServer() {
     },
     async () => ({
       content: [{ type: "text", text: "SOW Builder opened." }],
-      structuredContent: {
-        ready: true,
-        title: null,
-        sections: [],
-        markdown: ""
-      },
+      structuredContent: { ready: true, title: null, sections: [], markdown: "" },
       _meta: {}
     })
   );
 
+  // Tool: generate SOW
   const generateInputSchema = {
     project_name: z.string().min(1),
     client: z.string().optional(),
@@ -192,8 +197,7 @@ function createScopeSowServer() {
     "generate_sow",
     {
       title: "Generate SOW",
-      description:
-        "Generates a client-ready Statement of Work (SOW) from structured inputs.",
+      description: "Generates a client-ready Statement of Work (SOW) from structured inputs.",
       inputSchema: generateInputSchema,
       _meta: {
         "openai/outputTemplate": "ui://widget/scope-sow.html",
@@ -229,12 +233,17 @@ const httpServer = createServer(async (req, res) => {
 
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
+  // Accept both /mcp and /mcp/ (fixes common routing mismatch)
+  const isMcpRoute = url.pathname === MCP_PATH || url.pathname === `${MCP_PATH}/`;
+
+  // Health check
   if (req.method === "GET" && url.pathname === "/") {
     res.writeHead(200, { "content-type": "text/plain" }).end("Scope-to-SOW MCP server");
     return;
   }
 
-  if (req.method === "OPTIONS" && url.pathname === MCP_PATH) {
+  // CORS preflight for MCP
+  if (req.method === "OPTIONS" && isMcpRoute) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "POST, GET, OPTIONS, DELETE",
@@ -246,13 +255,13 @@ const httpServer = createServer(async (req, res) => {
   }
 
   const MCP_METHODS = new Set(["POST", "GET", "DELETE"]);
-  if (url.pathname === MCP_PATH && req.method && MCP_METHODS.has(req.method)) {
+  if (isMcpRoute && req.method && MCP_METHODS.has(req.method)) {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 
     const server = createScopeSowServer();
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
+      sessionIdGenerator: undefined, // stateless mode
       enableJsonResponse: true
     });
 
@@ -275,7 +284,5 @@ const httpServer = createServer(async (req, res) => {
 });
 
 httpServer.listen(port, () => {
-  console.log(
-    `Scope-to-SOW MCP server listening on http://localhost:${port}${MCP_PATH}`
-  );
+  console.log(`Scope-to-SOW MCP server listening on http://localhost:${port}${MCP_PATH}`);
 });
