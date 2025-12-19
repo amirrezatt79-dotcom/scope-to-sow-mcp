@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Scope-to-SOW Builder</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
+        color: #0b0b0f;
+      }
+      body { margin: 0; background: #f6f8fb; }
+      main { max-width: 780px; margin: 0 auto; padding: 16px; }
+      .card {
+        background: #fff;
+        border-radius: 16px;
+        padding: 16px;
+        box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+        margin-bottom: 12px;
+      }
+      h1 { font-size: 18px; margin: 0 0 10px; }
+      label { display: block; font-size: 12px; color: #4b5563; margin: 10px 0 6px; }
+      input, textarea {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #cad3e0;
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 14px;
+        outline: none;
+      }
+      textarea { min-height: 92px; resize: vertical; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+      button {
+        border: none;
+        border-radius: 12px;
+        padding: 10px 12px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.primary { background: #111bf5; color: #fff; }
+      button.ghost { background: #eef2ff; color: #111827; }
+      button.warn { background: #fee2e2; color: #7f1d1d; }
+      .muted { font-size: 12px; color: #6b7280; line-height: 1.35; }
+      pre {
+        white-space: pre-wrap;
+        word-break: break-word;
+        background: #0b1220;
+        color: #e5e7eb;
+        padding: 12px;
+        border-radius: 12px;
+        overflow: auto;
+        max-height: 420px;
+      }
+      .topline { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+      .badge { font-size: 12px; background: #f2f4fb; border-radius: 999px; padding: 4px 10px; color: #374151; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <div class="topline">
+          <h1>Scope-to-SOW Builder</h1>
+          <span class="badge" id="status">Ready</span>
+        </div>
+        <div class="muted">
+          Fill the fields and click Generate. Your text is processed per request and not stored by this app.
+          Avoid pasting secrets.
+        </div>
+
+        <form id="form" autocomplete="off">
+          <label>Project name</label>
+          <input id="project_name" placeholder="e.g., Website redesign" />
+
+          <div class="row">
+            <div>
+              <label>Client (optional)</label>
+              <input id="client" placeholder="e.g., Acme Clinic" />
+            </div>
+            <div>
+              <label>Timeline in weeks (optional)</label>
+              <input id="timeline_weeks" inputmode="numeric" placeholder="e.g., 6" />
+            </div>
+          </div>
+
+          <label>Goal</label>
+          <textarea id="goal" placeholder="What should success look like?"></textarea>
+
+          <label>Deliverables (one per line)</label>
+          <textarea id="deliverables" placeholder="Homepage redesign&#10;Design system updates&#10;Handoff package"></textarea>
+
+          <label>Constraints / notes (optional)</label>
+          <textarea id="constraints" placeholder="e.g., Two review rounds, fixed scope, brand guide must be followed"></textarea>
+
+          <div class="buttons">
+            <button class="primary" type="submit">Generate</button>
+            <button class="ghost" type="button" id="sample">Use sample</button>
+            <button class="warn" type="button" id="clear">Clear</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <div class="topline">
+          <h1>Generated SOW</h1>
+          <span class="badge" id="docTitle">None yet</span>
+        </div>
+
+        <div class="buttons">
+          <button class="ghost" type="button" id="copy">Copy</button>
+          <button class="ghost" type="button" id="send">Send to chat</button>
+        </div>
+
+        <pre id="output">Click Generate to create a Statement of Work.</pre>
+      </div>
+    </main>
+
+    <script type="module">
+      const $ = (id) => document.getElementById(id);
+
+      const statusEl = $("status");
+      const formEl = $("form");
+      const outEl = $("output");
+      const titleEl = $("docTitle");
+
+      const fields = {
+        project_name: $("project_name"),
+        client: $("client"),
+        timeline_weeks: $("timeline_weeks"),
+        goal: $("goal"),
+        deliverables: $("deliverables"),
+        constraints: $("constraints")
+      };
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      function getFormData() {
+        const timelineRaw = fields.timeline_weeks.value.trim();
+        const timeline = timelineRaw ? Number(timelineRaw) : undefined;
+
+        return {
+          project_name: fields.project_name.value.trim(),
+          client: fields.client.value.trim() || undefined,
+          goal: fields.goal.value.trim(),
+          deliverables: fields.deliverables.value.trim(),
+          constraints: fields.constraints.value.trim() || undefined,
+          timeline_weeks: Number.isFinite(timeline) ? timeline : undefined
+        };
+      }
+
+      function setFormData(data) {
+        fields.project_name.value = data.project_name ?? "";
+        fields.client.value = data.client ?? "";
+        fields.timeline_weeks.value = data.timeline_weeks ?? "";
+        fields.goal.value = data.goal ?? "";
+        fields.deliverables.value = data.deliverables ?? "";
+        fields.constraints.value = data.constraints ?? "";
+      }
+
+      function persistWidgetState() {
+        if (!window.openai?.setWidgetState) return;
+        window.openai.setWidgetState({ form: getFormData() });
+      }
+
+      function applyToolOutput(toolOutput) {
+        const doc = toolOutput ?? {};
+        if (doc.markdown) outEl.textContent = doc.markdown;
+        if (doc.title) titleEl.textContent = doc.title;
+      }
+
+      const initialState = window.openai?.widgetState?.form;
+      if (initialState) setFormData(initialState);
+
+      if (window.openai?.toolOutput) applyToolOutput(window.openai.toolOutput);
+
+      window.addEventListener(
+        "openai:set_globals",
+        (event) => {
+          const g = event.detail?.globals;
+          if (g?.widgetState?.form) setFormData(g.widgetState.form);
+          if (g?.toolOutput) applyToolOutput(g.toolOutput);
+        },
+        { passive: true }
+      );
+
+      Object.values(fields).forEach((el) => {
+        el.addEventListener("input", () => persistWidgetState(), { passive: true });
+      });
+
+      formEl.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        setStatus("Generating…");
+
+        const payload = getFormData();
+
+        if (!payload.project_name || !payload.goal || !payload.deliverables) {
+          setStatus("Missing required fields");
+          return;
+        }
+
+        if (window.openai?.callTool) {
+          try {
+            const resp = await window.openai.callTool("generate_sow", payload);
+            if (resp?.structuredContent) applyToolOutput(resp.structuredContent);
+            setStatus("Done");
+            return;
+          } catch (err) {
+            console.error(err);
+            setStatus("Error");
+            return;
+          }
+        }
+
+        setStatus("Preview mode");
+        outEl.textContent =
+          "This widget is designed to run inside ChatGPT Apps. Connect it to the MCP server to generate output.";
+      });
+
+      $("sample").addEventListener("click", () => {
+        setFormData({
+          project_name: "Website redesign",
+          client: "Acme Clinic",
+          timeline_weeks: "6",
+          goal: "Modernize the site, improve appointment conversions, and ensure mobile accessibility.",
+          deliverables:
+            "Homepage redesign\nServices page redesign\nConversion-focused contact/booking section\nHandoff package (files + guidelines)",
+          constraints: "Two review rounds. Fixed scope. Content provided by client by end of week 1."
+        });
+        persistWidgetState();
+      });
+
+      $("clear").addEventListener("click", () => {
+        setFormData({
+          project_name: "",
+          client: "",
+          timeline_weeks: "",
+          goal: "",
+          deliverables: "",
+          constraints: ""
+        });
+        persistWidgetState();
+        outEl.textContent = "Click Generate to create a Statement of Work.";
+        titleEl.textContent = "None yet";
+        setStatus("Ready");
+      });
+
+      $("copy").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(outEl.textContent || "");
+          setStatus("Copied");
+          setTimeout(() => setStatus("Ready"), 900);
+        } catch {
+          setStatus("Copy failed");
+        }
+      });
+
+      $("send").addEventListener("click", async () => {
+        if (!window.openai?.sendFollowUpMessage) {
+          setStatus("Chat send unavailable");
+          return;
+        }
+        const msg =
+          "Here is the generated SOW. Please review and improve clarity, consistency, and acceptance criteria:\n\n" +
+          (outEl.textContent || "");
+        await window.openai.sendFollowUpMessage({ message: msg });
+        setStatus("Sent to chat");
+        setTimeout(() => setStatus("Ready"), 900);
+      });
+    </script>
+  </body>
+</html>
